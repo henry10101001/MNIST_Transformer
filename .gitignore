@@ -1,0 +1,11 @@
+.DS_Store
+.ipynb_checkpoints
+.venv
+.vscode
+.idea
+.pytest_cache
+__pycache__
+notes*
+data/
+models/
+
