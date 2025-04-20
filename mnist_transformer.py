@@ -14,6 +14,7 @@ import math
 import time
 import os
 from torchvision import datasets, transforms
+import argparse
 
 # -- Hyperparameters --
 main_version = 0
@@ -25,55 +26,52 @@ n_layers = 6
 n_embed = 300
 ff_inner_multiplier = 4
 dropout = 0.2
-# device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
 vocab_size = 266 # 256 grayscale values + 10 for CLS tokens
 learning_rate = 3e-4
 weight_decay = 1e-2
 bar_update_every = 50
 eval_every = 1 # 1 epoch
 
-device = torch.device('cpu')
-print(f"Using device: {device}")
-
-
-# -- Data Loading --
-
-# download the dataset
-mnist_train = datasets.MNIST(
-    root='data/',
-    train=True,
-    download=True,
-)
-mnist_test = datasets.MNIST(
-    root='data/',
-    train=False,
-    download=True,
-)
 
 encode = lambda x: (x + 10) # add 10 to every grayscale value to account for CLS tokens 0-9; now, gs values are 10-265.
 decode = lambda x: (x - 10)
 
-# process training data
-train_images = mnist_train.data.view(-1, 784).to(torch.long)          # (60000, 784), ensure long for embedding
-train_labels = mnist_train.targets.unsqueeze(1).to(torch.long)        # (60000, 1)
-train_images_encoded = encode(train_images)                           # encoding (offset 10 to every grayscale value)
-x_train_full = torch.cat([train_labels, train_images_encoded], dim=1) # (60000, 785) - Renamed temporarily
+def load_data():
+    # download the dataset
+    mnist_train = datasets.MNIST(
+        root='data/',
+        train=True,
+        download=True,
+    )
+    mnist_test = datasets.MNIST(
+        root='data/',
+        train=False,
+        download=True,
+    )
 
-# process test data
-test_images = mnist_test.data.view(-1, 784).to(torch.long)    # (10000, 784), ensure long for embedding
-test_labels = mnist_test.targets.unsqueeze(1).to(torch.long)  # (10000, 1)
-test_images_encoded = encode(test_images)                     # encoding
-x_test = torch.cat([test_labels, test_images_encoded], dim=1) # (10000, 785)
+    # process training data
+    train_images = mnist_train.data.view(-1, 784).to(torch.long)          # (60000, 784), ensure long for embedding
+    train_labels = mnist_train.targets.unsqueeze(1).to(torch.long)        # (60000, 1)
+    train_images_encoded = encode(train_images)                           # encoding (offset 10 to every grayscale value)
+    x_train_full = torch.cat([train_labels, train_images_encoded], dim=1) # (60000, 785) - Renamed temporarily
+
+    # process test data
+    test_images = mnist_test.data.view(-1, 784).to(torch.long)    # (10000, 784), ensure long for embedding
+    test_labels = mnist_test.targets.unsqueeze(1).to(torch.long)  # (10000, 1)
+    test_images_encoded = encode(test_images)                     # encoding
+    x_test = torch.cat([test_labels, test_images_encoded], dim=1) # (10000, 785)
 
 
-# train/val split (50000, 785) (10000, 785)
-train_subset, val_subset = torch.utils.data.random_split(x_train_full, [50000, 10000])
-x_train = x_train_full[train_subset.indices]
-x_val = x_train_full[val_subset.indices]
+    # train/val split (50000, 785) (10000, 785)
+    train_subset, val_subset = torch.utils.data.random_split(x_train_full, [50000, 10000])
+    x_train = x_train_full[train_subset.indices]
+    x_val = x_train_full[val_subset.indices]
 
-# -- Data Loader / Batching --
-train_loader = torch.utils.data.DataLoader(x_train, batch_size=batch_size, shuffle=True, drop_last=True)
-val_loader = torch.utils.data.DataLoader(x_val, batch_size=batch_size, shuffle=False, drop_last=False)
+    # -- Data Loader / Batching --
+    train_loader = torch.utils.data.DataLoader(x_train, batch_size=batch_size, shuffle=True, drop_last=True)
+    val_loader = torch.utils.data.DataLoader(x_val, batch_size=batch_size, shuffle=False, drop_last=False)
+    
+    return train_loader, val_loader
 
 # -- Feed Forward --
 class FeedForward(nn.Module):
@@ -146,8 +144,9 @@ class Block(nn.Module):
 
 # -- Transformer --
 class MNISTTransformer(nn.Module):
-    def __init__(self):
+    def __init__(self, device=torch.device('cpu')):
         super().__init__()
+        self.device = device
         self.token_embedding_table = nn.Embedding(vocab_size, n_embed)
         self.position_embedding_table = nn.Embedding(seq_len, n_embed)
         self.blocks = nn.Sequential(*[Block(n_embed, n_heads) for _ in range(n_layers)])
@@ -158,7 +157,7 @@ class MNISTTransformer(nn.Module):
         B, T = idx.shape
         
         token_embeddings = self.token_embedding_table(idx) # (batch_size, seq_len, n_embed) aka B, T, C where C = n_embed
-        position_embeddings = self.position_embedding_table(torch.arange(T, device=device)) # (seq_len, n_embed)
+        position_embeddings = self.position_embedding_table(torch.arange(T, device=self.device)) # use self.device here
         x = token_embeddings + position_embeddings # (batch_size, seq_len, n_embed)
         x = self.blocks(x)
         x = self.ln_f(x)
@@ -187,12 +186,17 @@ class MNISTTransformer(nn.Module):
             # append sampled index to the running sequence
             idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
         return idx[:, 1:]  # remove the CLS token before returning
-        
-        
+
         
 # -- Training Function --
-def train():
-    model = MNISTTransformer()
+def train(device=torch.device('cpu')):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--device', type=str, default='cpu', help='Device to use (e.g., cpu, cuda, mps)')
+    args = parser.parse_args()
+    device = torch.device(args.device)
+    
+    train_loader, val_loader = load_data()
+    model = MNISTTransformer(device=device)
     model.to(device)
     
     # make dirs
@@ -217,7 +221,7 @@ def train():
         transient=False
     )
     # calculate total samples instead of total steps
-    total_samples = n_epochs * len(x_train) 
+    total_samples = n_epochs * len(train_loader.dataset) # len(train_loader.dataset) is the number of samples in the training set
     task_id = progress.add_task(
         "training", total=total_samples, # use total samples for the progress bar total
         epoch=1, total_epochs=n_epochs,

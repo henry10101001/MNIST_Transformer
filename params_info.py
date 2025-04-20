@@ -12,7 +12,7 @@ def main():
     console = Console()
     console.print(f"Using device: [bold yellow]{device}[/bold yellow]")
 
-    model_path = 'models/mnist_transformer_v0.3.pt'
+    model_path = 'models/mnist_transformer_6.9M_v0.1.pt'
     model = None
 
     # load model
