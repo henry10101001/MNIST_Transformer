@@ -2,23 +2,26 @@ import torch
 from rich.console import Console
 from rich.table import Table
 from collections import defaultdict
+import argparse
 
 from model import MNISTTransformer
 
 def main():
+    # parse arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model', type=str, default='mnist_transformer_v1.5.pt')
+    parser.add_argument('--device', type=str, default='cpu')
+    args = parser.parse_args()
+
     # set device and console
-    # device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
-    device = torch.device('cpu')
+    device = torch.device(args.device)
     console = Console()
     console.print(f"Using device: [bold yellow]{device}[/bold yellow]")
 
-    model_path = 'models/mnist_transformer_6.9M_v0.1.pt'
-    model = None
-
     # load model
-    console.print(f"Loading model from [bold cyan]{model_path}[/]...")
+    console.print(f"Loading model [bold cyan]{args.model}[/]...")
     try:
-        checkpoint = torch.load(model_path, map_location=device)
+        checkpoint = torch.load(f'models/{args.model}', map_location=device)
         console.print("[green]Checkpoint loaded successfully.[/green]")
         model = MNISTTransformer()
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -26,7 +29,7 @@ def main():
         model.eval()
         console.print("[green]Model loaded and ready.[/green]")
     except FileNotFoundError:
-        console.print(f"[bold red]Error: Model file not found at {model_path}[/bold red]")
+        console.print(f"[bold red]Error: Model file not found at models/{args.model}[/bold red]")
     except Exception as e:
         console.print(f"[bold red]An error occurred while loading the model: {e}[/bold red]")
 

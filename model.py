@@ -16,23 +16,22 @@ import os
 from torchvision import datasets, transforms
 import argparse
 from torch.nn.functional import scaled_dot_product_attention
-from torchtune.modules import RotaryPositionalEmbeddings
 
 
 # -- Hyperparameters --
 config = {
     'main_version': 1,
-    'batch_size': 48,
+    'batch_size': 64,
     'n_epochs': 10,
-    'seq_len': 784,
-    'n_heads': 6,
-    'n_layers': 6,
-    'n_embed': 456,
+    'seq_len': 785,
+    'n_heads': 4,
+    'n_layers': 4,
+    'n_embed': 256,
     'ff_inner_multiplier': 4,
     'dropout': 0.2,
     'vocab_size': 266, # 256 grayscale values + 10 for CLS tokens
     'learning_rate': 3e-4,
-    'weight_decay': 1e-2,
+    'weight_decay': 1e-3,
     'bar_update_every': 50,
     'eval_every': 1, # 1 epoch
 }
@@ -131,22 +130,16 @@ class FeedForward(nn.Module):
 #         return out
     
 class FlashMultiHeadAttention(nn.Module):
-    def __init__(self, n_embed=config['n_embed'], n_heads=config['n_heads'], dropout=0.1, max_seq_len=config['seq_len'], base=10000, device=torch.device('cpu')): # base is the base of the exponential function
+    def __init__(self, n_embed=config['n_embed'], n_heads=config['n_heads'], dropout=config['dropout'], device=torch.device('cpu')): # base is the base of the exponential function
         super().__init__()
         assert n_embed % n_heads == 0
         self.device = device
         self.n_head = n_heads
         self.head_dim = n_embed // n_heads
         
-        self.qkv_proj  = nn.Linear(n_embed, 3 * n_embed, bias=False)
-        self.out_proj  = nn.Linear(n_embed, n_embed, bias=False)
+        self.qkv_proj  = nn.Linear(n_embed, 3 * n_embed, bias=False).to(device)
+        self.out_proj  = nn.Linear(n_embed, n_embed, bias=False).to(device)
         self.dropout_p = dropout
-
-        self.rotary = RotaryPositionalEmbeddings(
-            dim=self.head_dim,
-            max_seq_len=max_seq_len,
-            base=base,
-        )
         
     def forward(self, x):
         B, T, C = x.shape
@@ -158,11 +151,7 @@ class FlashMultiHeadAttention(nn.Module):
         # 2) permute to (B, nH, T, hD)
         q, k, v = [t.transpose(1, 2) for t in (q, k, v)]
         
-        # 3) apply rotary embeddings
-        q = self.rotary(q)
-        k = self.rotary(k)
-        
-        # 4) flash attention
+        # 3) flash attention
         out = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=None,
@@ -170,11 +159,10 @@ class FlashMultiHeadAttention(nn.Module):
             is_causal=True
         )
         
-        # 5) merge heads & project
+        # 4) merge heads & project
         out = out.transpose(1, 2).reshape(B, T, C)
         out = self.out_proj(out)
         return out
-        
 # -- Block --
 class Block(nn.Module):
     def __init__(self, n_embed, num_heads, device=torch.device('cpu')):
@@ -196,15 +184,28 @@ class MNISTTransformer(nn.Module):
         super().__init__()
         self.device = device
         self.token_embedding_table = nn.Embedding(config['vocab_size'], config['n_embed'])
+        self.position_embedding_table = nn.Embedding(config['seq_len'], config['n_embed'])
         self.blocks = nn.Sequential(*[Block(config['n_embed'], config['n_heads'], device=device) for _ in range(config['n_layers'])])
         self.ln_f = nn.LayerNorm(config['n_embed'])
         self.model_head = nn.Linear(config['n_embed'], config['vocab_size'])
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
         
         token_embeddings = self.token_embedding_table(idx) # (batch_size, seq_len, n_embed) aka B, T, C where C = n_embed
-        x = token_embeddings # (batch_size, seq_len, n_embed)
+        position_embeddings = self.position_embedding_table(torch.arange(T, device=self.device)) # (seq_len, n_embed)
+        x = token_embeddings + position_embeddings # (batch_size, seq_len, n_embed)
+
         x = self.blocks(x)
         x = self.ln_f(x)
         logits = self.model_head(x)                # (batch_size, seq_len, vocab_size)

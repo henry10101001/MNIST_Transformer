@@ -111,8 +111,8 @@ def train(device=torch.device('cpu')):
 
             # ---- save checkpoint each epoch ----
             # get highest version number from existing checkpoints
-            existing = glob.glob("models/mnist_transformer_v0.*.pt")
-            version = 0 if not existing else max([int(f.split("v0.")[1].split(".pt")[0]) for f in existing]) + 1
+            existing = glob.glob(f"models/mnist_transformer_v{config['main_version']}.*.pt")
+            version = 0 if not existing else max([int(f.split(f"v{config['main_version']}.")[1].split(".pt")[0]) for f in existing]) + 1
             ckpt_name = f"models/mnist_transformer_v{config['main_version']}.{version}.pt"
             torch.save({
                 'model_state_dict': model.state_dict(),
