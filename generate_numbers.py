@@ -1,7 +1,7 @@
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
-from mnist_transformer import MNISTTransformer
+from model import MNISTTransformer
 import random
 
 # set device

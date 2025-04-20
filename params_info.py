@@ -3,7 +3,7 @@ from rich.console import Console
 from rich.table import Table
 from collections import defaultdict
 
-from mnist_transformer import MNISTTransformer
+from model import MNISTTransformer
 
 def main():
     # set device and console

@@ -4,7 +4,7 @@ import random
 import numpy as np
 import torch
 import torch.nn.functional as F
-from mnist_transformer import MNISTTransformer, decode
+from model import MNISTTransformer, decode
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, MofNCompleteColumn
 import matplotlib.pyplot as plt
 import os
