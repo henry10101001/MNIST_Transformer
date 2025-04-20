@@ -5,3 +5,5 @@ keras
 tensorflow
 rich
 torchvision
+torchtune
+torchao

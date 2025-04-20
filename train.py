@@ -130,3 +130,6 @@ def train(device=torch.device('cpu')):
     progress.print("loss plot saved to stats/loss_plot.png")
     
     return model
+
+if __name__ == "__main__":
+    train()

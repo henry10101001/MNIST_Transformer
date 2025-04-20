@@ -16,6 +16,8 @@ import os
 from torchvision import datasets, transforms
 import argparse
 from torch.nn.functional import scaled_dot_product_attention
+from torchtune.modules import RotaryPositionalEmbeddings
+
 
 # -- Hyperparameters --
 config = {
@@ -32,7 +34,8 @@ config = {
     'learning_rate': 3e-4,
     'weight_decay': 1e-2,
     'bar_update_every': 50,
-    'eval_every': 1 # 1 epoch
+    'eval_every': 1, # 1 epoch
+    'device': torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
 }
 
 encode = lambda x: (x + 10) # add 10 to every grayscale value to account for CLS tokens 0-9; now, gs values are 10-265.
@@ -91,55 +94,99 @@ class FeedForward(nn.Module):
             
 
 # -- Attention --
-class AttentionHead(nn.Module):
-    def __init__(self, head_size):
+# class AttentionHead(nn.Module):
+#     def __init__(self, head_size):
+#         super().__init__()
+#         self.key = nn.Linear(config['n_embed'], config['head_size'], bias=False)
+#         self.query = nn.Linear(config['n_embed'], config['head_size'], bias=False)
+#         self.value = nn.Linear(config['n_embed'], config['head_size'], bias=False)
+#         self.register_buffer('tril', torch.tril(torch.ones(config['seq_len'], config['seq_len'])))
+#         self.dropout = nn.Dropout(config['dropout'])
+        
+#     def forward(self, x):
+#         B, T, C = x.shape
+
+#         k = self.key(x)   # (B, T, head_size)
+#         q = self.query(x) # (B, T, head_size)
+
+#         weights = q @ k.transpose(-2, -1) * (C**-0.5) # (B, T, head_size) @ (B, head_size, T) -> (B, T, T) explanation: basically, for each batch, we multiply a (T, head_size) matrix by a (head_size, T) matrix, which results in a (T, T) matrix for each batch, so we get a (B, T, T) matrix
+#         weights = weights.masked_fill(self.tril[:T, :T] == 0, float("-inf")) # piece de resistance of ye olde 'decoder' transformer (AR)
+#         weights = F.softmax(weights, dim=-1) # (B, T, T)
+#         weights = self.dropout(weights)
+        
+#         v = self.value(x) # (B, T, head_size)
+#         out = weights @ v # (B, T, T) @ (B, T, C) -> (B, T, C)
+
+#         return out
+    
+# class MultiHeadAttention(nn.Module):
+#     def __init__(self, num_heads, head_size):
+#         super().__init__()
+#         self.heads = nn.ModuleList([AttentionHead(head_size) for _ in range(num_heads)])
+#         self.proj = nn.Linear(config['n_embed'], config['n_embed'])
+#         self.dropout = nn.Dropout(config['dropout'])
+        
+#     def forward(self, x):
+#         out = torch.cat([head(x) for head in self.heads], dim=-1)
+#         out = self.dropout(self.proj(out))
+#         return out
+    
+class FlashMultiHeadAttention(nn.Module):
+    def __init__(self, n_embed=config['n_embed'], n_heads=config['n_heads'], dropout=0.1, max_seq_len=config['seq_len'], base=10000, device=config['device']): # base is the base of the exponential function
         super().__init__()
-        self.key = nn.Linear(config['n_embed'], config['head_size'], bias=False)
-        self.query = nn.Linear(config['n_embed'], config['head_size'], bias=False)
-        self.value = nn.Linear(config['n_embed'], config['head_size'], bias=False)
-        self.register_buffer('tril', torch.tril(torch.ones(config['seq_len'], config['seq_len'])))
-        self.dropout = nn.Dropout(config['dropout'])
+        assert n_embed % n_heads == 0
+        self.device = device
+        self.n_head = n_heads
+        self.head_dim = n_embed // n_heads
+        
+        self.qkv_proj  = nn.Linear(n_embed, 3 * n_embed, bias=False)
+        self.out_proj  = nn.Linear(n_embed, n_embed, bias=False)
+        self.dropout_p = dropout
+
+        self.rotary = RotaryPositionalEmbeddings(
+            dim=self.head_dim,
+            max_seq_len=max_seq_len,
+            base=base,
+        )
         
     def forward(self, x):
         B, T, C = x.shape
-
-        k = self.key(x)   # (B, T, head_size)
-        q = self.query(x) # (B, T, head_size)
-
-        weights = q @ k.transpose(-2, -1) * (C**-0.5) # (B, T, head_size) @ (B, head_size, T) -> (B, T, T) explanation: basically, for each batch, we multiply a (T, head_size) matrix by a (head_size, T) matrix, which results in a (T, T) matrix for each batch, so we get a (B, T, T) matrix
-        weights = weights.masked_fill(self.tril[:T, :T] == 0, float("-inf")) # piece de resistance of ye olde 'decoder' transformer (AR)
-        weights = F.softmax(weights, dim=-1) # (B, T, T)
-        weights = self.dropout(weights)
         
-        v = self.value(x) # (B, T, head_size)
-        out = weights @ v # (B, T, T) @ (B, T, C) -> (B, T, C)
-
-        return out
-    
-class MultiHeadAttention(nn.Module):
-    def __init__(self, num_heads, head_size):
-        super().__init__()
-        self.heads = nn.ModuleList([AttentionHead(head_size) for _ in range(num_heads)])
-        self.proj = nn.Linear(config['n_embed'], config['n_embed'])
-        self.dropout = nn.Dropout(config['dropout'])
+        # 1) project & reshape: (B, T, 3, nH, hD)
+        qkv = self.qkv_proj(x).view(B, T, 3, self.n_head, self.head_dim)
+        q, k, v = qkv.unbind(dim=2)  # (B, T, nH, hD) each
         
-    def forward(self, x):
-        out = torch.cat([head(x) for head in self.heads], dim=-1)
-        out = self.dropout(self.proj(out))
+        # 2) permute to (B, nH, T, hD)
+        q, k, v = [t.transpose(1, 2) for t in (q, k, v)]
+        
+        # 3) apply rotary embeddings
+        q = self.rotary(q)
+        k = self.rotary(k)
+        
+        # 4) flash attention
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=None,
+            dropout_p=self.dropout_p,
+            is_causal=True
+        )
+        
+        # 5) merge heads & project
+        out = out.transpose(1, 2).reshape(B, T, C)
+        out = self.out_proj(out)
         return out
-    
+        
 # -- Block --
 class Block(nn.Module):
     def __init__(self, n_embed, num_heads):
         super().__init__()
-        head_size = n_embed // num_heads
-        self.sa = MultiHeadAttention(num_heads, head_size)
+        self.attn = FlashMultiHeadAttention() # default values (see __init__ of FlashMultiHeadAttention)
         self.ffwd = FeedForward(config['n_embed'])
         self.ln1 = nn.LayerNorm(config['n_embed'])
         self.ln2 = nn.LayerNorm(config['n_embed'])
         
     def forward(self, x):
-        x = x + self.sa(self.ln1(x))   # residual connection
+        x = x + self.attn(self.ln1(x)) # residual connection
         x = x + self.ffwd(self.ln2(x)) # residual connection
         return x
         
@@ -150,7 +197,6 @@ class MNISTTransformer(nn.Module):
         super().__init__()
         self.device = device
         self.token_embedding_table = nn.Embedding(config['vocab_size'], config['n_embed'])
-        self.position_embedding_table = nn.Embedding(config['seq_len'], config['n_embed'])
         self.blocks = nn.Sequential(*[Block(config['n_embed'], config['n_heads']) for _ in range(config['n_layers'])])
         self.ln_f = nn.LayerNorm(config['n_embed'])
         self.model_head = nn.Linear(config['n_embed'], config['vocab_size'])
@@ -159,8 +205,7 @@ class MNISTTransformer(nn.Module):
         B, T = idx.shape
         
         token_embeddings = self.token_embedding_table(idx) # (batch_size, seq_len, n_embed) aka B, T, C where C = n_embed
-        position_embeddings = self.position_embedding_table(torch.arange(T, device=self.device)) # use self.device here
-        x = token_embeddings + position_embeddings # (batch_size, seq_len, n_embed)
+        x = token_embeddings # (batch_size, seq_len, n_embed)
         x = self.blocks(x)
         x = self.ln_f(x)
         logits = self.model_head(x)                # (batch_size, seq_len, vocab_size)
