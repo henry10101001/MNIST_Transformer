@@ -21,13 +21,13 @@ from torchtune.modules import RotaryPositionalEmbeddings
 
 # -- Hyperparameters --
 config = {
-    'main_version': 0,
-    'batch_size': 32,
+    'main_version': 1,
+    'batch_size': 48,
     'n_epochs': 10,
     'seq_len': 784,
     'n_heads': 6,
     'n_layers': 6,
-    'n_embed': 300,
+    'n_embed': 456,
     'ff_inner_multiplier': 4,
     'dropout': 0.2,
     'vocab_size': 266, # 256 grayscale values + 10 for CLS tokens
@@ -35,7 +35,6 @@ config = {
     'weight_decay': 1e-2,
     'bar_update_every': 50,
     'eval_every': 1, # 1 epoch
-    'device': torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
 }
 
 encode = lambda x: (x + 10) # add 10 to every grayscale value to account for CLS tokens 0-9; now, gs values are 10-265.
@@ -132,7 +131,7 @@ class FeedForward(nn.Module):
 #         return out
     
 class FlashMultiHeadAttention(nn.Module):
-    def __init__(self, n_embed=config['n_embed'], n_heads=config['n_heads'], dropout=0.1, max_seq_len=config['seq_len'], base=10000, device=config['device']): # base is the base of the exponential function
+    def __init__(self, n_embed=config['n_embed'], n_heads=config['n_heads'], dropout=0.1, max_seq_len=config['seq_len'], base=10000, device=torch.device('cpu')): # base is the base of the exponential function
         super().__init__()
         assert n_embed % n_heads == 0
         self.device = device
@@ -178,9 +177,9 @@ class FlashMultiHeadAttention(nn.Module):
         
 # -- Block --
 class Block(nn.Module):
-    def __init__(self, n_embed, num_heads):
+    def __init__(self, n_embed, num_heads, device=torch.device('cpu')):
         super().__init__()
-        self.attn = FlashMultiHeadAttention() # default values (see __init__ of FlashMultiHeadAttention)
+        self.attn = FlashMultiHeadAttention(device=device) # default values (see __init__ of FlashMultiHeadAttention)
         self.ffwd = FeedForward(config['n_embed'])
         self.ln1 = nn.LayerNorm(config['n_embed'])
         self.ln2 = nn.LayerNorm(config['n_embed'])
@@ -197,7 +196,7 @@ class MNISTTransformer(nn.Module):
         super().__init__()
         self.device = device
         self.token_embedding_table = nn.Embedding(config['vocab_size'], config['n_embed'])
-        self.blocks = nn.Sequential(*[Block(config['n_embed'], config['n_heads']) for _ in range(config['n_layers'])])
+        self.blocks = nn.Sequential(*[Block(config['n_embed'], config['n_heads'], device=device) for _ in range(config['n_layers'])])
         self.ln_f = nn.LayerNorm(config['n_embed'])
         self.model_head = nn.Linear(config['n_embed'], config['vocab_size'])
 

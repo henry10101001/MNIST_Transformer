@@ -12,6 +12,7 @@ def train(device=torch.device('cpu')):
     parser.add_argument('--device', type=str, default='cpu', help='Device to use (e.g., cpu, cuda, mps)')
     args = parser.parse_args()
     device = torch.device(args.device)
+    print(f"Using device: {device}")
     
     train_loader, val_loader = load_data()
     model = MNISTTransformer(device=device)
